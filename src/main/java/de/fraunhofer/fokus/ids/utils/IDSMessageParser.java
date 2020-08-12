@@ -3,6 +3,7 @@ package de.fraunhofer.fokus.ids.utils;
 import de.fraunhofer.fokus.ids.utils.models.IDSMessage;
 import de.fraunhofer.iais.eis.Message;
 import de.fraunhofer.iais.eis.ids.jsonld.Serializer;
+import io.vertx.core.MultiMap;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 import org.apache.commons.io.IOUtils;
@@ -20,14 +21,15 @@ import java.util.Optional;
  */
 public class IDSMessageParser {
     private static Logger LOGGER = LoggerFactory.getLogger(IDSMessageParser.class.getName());
-    private static final String SEPARATOR = "msgpart";
     private static Serializer serializer = new Serializer();
 
-    public static Optional<IDSMessage> parse(String requestMessage){
+    @Deprecated
+    //Use the other parse method
+    public static Optional<IDSMessage> parse(String contentType, String requestMessage){
 
         InputStream messageBodyStream = new ByteArrayInputStream(requestMessage.getBytes(Charset.defaultCharset()));
 
-        MultiPartFormInputStream multiPartInputStream = new MultiPartFormInputStream(messageBodyStream, "multipart/form-data; boundary="+SEPARATOR, null, null);
+        MultiPartFormInputStream multiPartInputStream = new MultiPartFormInputStream(messageBodyStream, contentType, null, null);
         try {
             Part header = multiPartInputStream.getPart("header");
             Part payload = multiPartInputStream.getPart("payload");
@@ -51,5 +53,19 @@ public class IDSMessageParser {
             LOGGER.error(e);
         }
         return Optional.empty();
+    }
+
+    public static Optional<IDSMessage> parse(MultiMap messagePartsMap){
+        String header = messagePartsMap.get("header");
+        String payload = messagePartsMap.get("payload");
+
+        Message idsMessage;
+        try{
+            idsMessage = serializer.deserialize(header, Message.class);
+        } catch( Exception e){
+            LOGGER.error("Could not deserialize message.");
+            return  Optional.empty();
+        }
+        return Optional.of(new IDSMessage(idsMessage, payload));
     }
 }
