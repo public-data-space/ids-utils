@@ -54,6 +54,7 @@ public class AuthAdapterServiceImpl implements AuthAdapterService {
     private String targetAudience = "idsc:IDS_CONNECTORS_ALL";
     private WebClient webClient;
     private CircuitBreaker breaker;
+    private String mode;
 
     public AuthAdapterServiceImpl(Vertx vertx,
                                   WebClient webClient,
@@ -65,83 +66,88 @@ public class AuthAdapterServiceImpl implements AuthAdapterService {
             this.vertx = vertx;
             this.dapsUrl = config.getString("dapsurl");
             this.dapsIssuer = config.getString("dapsissuer");
+            this.mode = config.getString("mode");
+            LOGGER.info("Auth Mode set to: " + this.mode);
             this.breaker = CircuitBreaker.create("token-circuit-breaker", vertx,
-                new CircuitBreakerOptions().setMaxRetries(10)
+                    new CircuitBreakerOptions().setMaxRetries(10)
             ).retryPolicy(retryCount -> retryCount * 500L);
 
-            // Try clause for setup phase (loading keys, building trust manager)
-            try {
-                InputStream jksKeyStoreInputStream =
-                        Files.newInputStream(targetDirectory.resolve(config.getString("keystorename")));
-                InputStream jksTrustStoreInputStream =
-                        Files.newInputStream(targetDirectory.resolve(config.getString("truststorename")));
 
-                KeyStore keystore = KeyStore.getInstance("PKCS12");
-                KeyStore trustManagerKeyStore = KeyStore.getInstance("PKCS12");
+            if (this.mode.toLowerCase().equals("enforce") || this.mode.toLowerCase().equals("identify")) {
+                // Try clause for setup phase (loading keys, building trust manager)
+                try {
+                    InputStream jksKeyStoreInputStream =
+                            Files.newInputStream(targetDirectory.resolve(config.getString("keystorename")));
+                    InputStream jksTrustStoreInputStream =
+                            Files.newInputStream(targetDirectory.resolve(config.getString("truststorename")));
 
-                LOGGER.info("Loading key store: " + config.getString("keystorename"));
-                LOGGER.info("Loading trust store: " + config.getString("truststorename"));
-                keystore.load(jksKeyStoreInputStream, config.getString("keystorepassword").toCharArray());
-                trustManagerKeyStore.load(jksTrustStoreInputStream,  config.getString("keystorepassword").toCharArray());
-                java.security.cert.Certificate[] certs = trustManagerKeyStore.getCertificateChain("aisecdaps");
-                LOGGER.info("Cert chain: " + Arrays.toString(certs));
+                    KeyStore keystore = KeyStore.getInstance("PKCS12");
+                    KeyStore trustManagerKeyStore = KeyStore.getInstance("PKCS12");
 
-                LOGGER.info("LOADED CA CERT: " + trustManagerKeyStore.getCertificate("aisecdaps"));
-                jksKeyStoreInputStream.close();
-                jksTrustStoreInputStream.close();
+                    LOGGER.info("Loading key store: " + config.getString("keystorename"));
+                    LOGGER.info("Loading trust store: " + config.getString("truststorename"));
+                    keystore.load(jksKeyStoreInputStream, config.getString("keystorepassword").toCharArray());
+                    trustManagerKeyStore.load(jksTrustStoreInputStream, config.getString("keystorepassword").toCharArray());
+                    java.security.cert.Certificate[] certs = trustManagerKeyStore.getCertificateChain("aisecdaps");
+                    LOGGER.info("Cert chain: " + Arrays.toString(certs));
 
-                // get private key
-                this.privKey = keystore.getKey(config.getString("keystorealias"), config.getString("keystorepassword").toCharArray());
-                // Get certificate of public key
-                this.cert = (X509Certificate) keystore.getCertificate(config.getString("keystorealias"));
+                    LOGGER.info("LOADED CA CERT: " + trustManagerKeyStore.getCertificate("aisecdaps"));
+                    jksKeyStoreInputStream.close();
+                    jksTrustStoreInputStream.close();
 
-                LOGGER.info("\tCertificate Subject: " + cert.getSubjectDN());
+                    // get private key
+                    this.privKey = keystore.getKey(config.getString("keystorealias"), config.getString("keystorepassword").toCharArray());
+                    // Get certificate of public key
+                    this.cert = (X509Certificate) keystore.getCertificate(config.getString("keystorealias"));
 
-                // Get AKI
-                //GET 2.5.29.14	SubjectKeyIdentifier / 2.5.29.35	AuthorityKeyIdentifier
-                String aki_oid = Extension.authorityKeyIdentifier.getId();
-                byte[] rawAuthorityKeyIdentifier = cert.getExtensionValue(aki_oid);
-                ASN1OctetString akiOc = ASN1OctetString.getInstance(rawAuthorityKeyIdentifier);
-                AuthorityKeyIdentifier aki = AuthorityKeyIdentifier.getInstance(akiOc.getOctets());
-                byte[] authorityKeyIdentifier = aki.getKeyIdentifier();
+                    LOGGER.info("\tCertificate Subject: " + cert.getSubjectDN());
 
-                //GET SKI
-                String ski_oid = Extension.subjectKeyIdentifier.getId();
-                byte[] rawSubjectKeyIdentifier = cert.getExtensionValue(ski_oid);
-                ASN1OctetString ski0c = ASN1OctetString.getInstance(rawSubjectKeyIdentifier);
-                SubjectKeyIdentifier ski = SubjectKeyIdentifier.getInstance(ski0c.getOctets());
-                byte[] subjectKeyIdentifier = ski.getKeyIdentifier();
+                    // Get AKI
+                    //GET 2.5.29.14	SubjectKeyIdentifier / 2.5.29.35	AuthorityKeyIdentifier
+                    String aki_oid = Extension.authorityKeyIdentifier.getId();
+                    byte[] rawAuthorityKeyIdentifier = cert.getExtensionValue(aki_oid);
+                    ASN1OctetString akiOc = ASN1OctetString.getInstance(rawAuthorityKeyIdentifier);
+                    AuthorityKeyIdentifier aki = AuthorityKeyIdentifier.getInstance(akiOc.getOctets());
+                    byte[] authorityKeyIdentifier = aki.getKeyIdentifier();
 
-                String aki_result = beautifyHex(encodeHexString(authorityKeyIdentifier).toUpperCase());
-                String ski_result = beautifyHex(encodeHexString(subjectKeyIdentifier).toUpperCase());
+                    //GET SKI
+                    String ski_oid = Extension.subjectKeyIdentifier.getId();
+                    byte[] rawSubjectKeyIdentifier = cert.getExtensionValue(ski_oid);
+                    ASN1OctetString ski0c = ASN1OctetString.getInstance(rawSubjectKeyIdentifier);
+                    SubjectKeyIdentifier ski = SubjectKeyIdentifier.getInstance(ski0c.getOctets());
+                    byte[] subjectKeyIdentifier = ski.getKeyIdentifier();
 
-                this.connectorUUID = ski_result + "keyid:" + aki_result.substring(0, aki_result.length() - 1);
+                    String aki_result = beautifyHex(encodeHexString(authorityKeyIdentifier).toUpperCase());
+                    String ski_result = beautifyHex(encodeHexString(subjectKeyIdentifier).toUpperCase());
 
-                LOGGER.info("AKI: " + aki_result);
-                LOGGER.info("SKI: " + ski_result);
-                LOGGER.info("ConnectorUUID: " + this.connectorUUID);
-                readyHandler.handle(Future.succeededFuture(this));
+                    this.connectorUUID = ski_result + "keyid:" + aki_result.substring(0, aki_result.length() - 1);
 
-            } catch (KeyStoreException
-                    | NoSuchAlgorithmException
-                    | CertificateException
-                    | UnrecoverableKeyException e) {
-                LOGGER.error("Cannot acquire token:", e);
-                readyHandler.handle(Future.failedFuture(e));
-            } catch (IOException e) {
-                LOGGER.error("Error retrieving token:", e);
-                readyHandler.handle(Future.failedFuture(e));
-            } catch (Exception e) {
-                LOGGER.error("Something else went wrong:", e);
-                readyHandler.handle(Future.failedFuture(e));
+                    LOGGER.info("AKI: " + aki_result);
+                    LOGGER.info("SKI: " + ski_result);
+                    LOGGER.info("ConnectorUUID: " + this.connectorUUID);
+
+                } catch (KeyStoreException
+                        | NoSuchAlgorithmException
+                        | CertificateException
+                        | UnrecoverableKeyException e) {
+                    LOGGER.error("Cannot acquire token:", e);
+                    readyHandler.handle(Future.failedFuture(e));
+                } catch (IOException e) {
+                    LOGGER.error("Error retrieving token:", e);
+                    readyHandler.handle(Future.failedFuture(e));
+                } catch (Exception e) {
+                    LOGGER.error("Something else went wrong:", e);
+                    readyHandler.handle(Future.failedFuture(e));
+                }
             }
         }
+        readyHandler.handle(Future.succeededFuture(this));
     }
 
     @Override
     public AuthAdapterService isAuthenticated(String token, Handler<AsyncResult<Void>> handler) {
-        verifyJWT(new JsonObject().put("jwt", token),  reply -> {
-            if(reply.succeeded()){
+        verifyJWT(new JsonObject().put("jwt", token), reply -> {
+            if (reply.succeeded()) {
                 handler.handle(Future.succeededFuture());
             } else {
                 handler.handle(Future.failedFuture(reply.cause()));
@@ -153,69 +159,74 @@ public class AuthAdapterServiceImpl implements AuthAdapterService {
     private void verifyJWT(
             JsonObject dynamicAttributeTokenJson,
             Handler<AsyncResult<User>> resultHandler) {
+        if(this.mode.toLowerCase().equals("enforce")) {
+            LOGGER.info("Verifying JWT...");
+            URL url = null;
+            try {
+                url = new URL(dapsUrl);
+            } catch (MalformedURLException e) {
+                e.printStackTrace();
+            }
 
-        LOGGER.info("Verifying JWT...");
-        URL url = null;
-        try {
-            url = new URL(dapsUrl);
-        } catch (MalformedURLException e) {
-            e.printStackTrace();
-        }
-
-        webClient.get(443,url.getHost(), url.getPath()+"/.well-known/jwks.json")
-                .ssl(true)
-                .send(jwksReply -> {
-                    if(jwksReply.succeeded()){
-                        JsonArray jArray = jwksReply.result().bodyAsJsonObject().getJsonArray("keys");
-                        List<JsonObject> objList = new ArrayList<>();
-                        for(int i = 0;i<jArray.size();i++){
-                            objList.add(jArray.getJsonObject(i));
-                        }
-                        AuthProvider p = JWTAuth.create(vertx,
-                                new JWTAuthOptions()
-                                        .setJwks(objList).setJWTOptions(
-                                                new JWTOptions()
-                                                        .setIgnoreExpiration(false)
-                                                        .setAudience(Arrays.asList(this.targetAudience))
-                                                        .setIssuer(dapsIssuer)));
-                        p.authenticate(dynamicAttributeTokenJson, authReply -> {
-                            if(authReply.succeeded()){
-                                resultHandler.handle(Future.succeededFuture(authReply.result()));
-                            } else {
-                                LOGGER.info(authReply.cause());
-                                resultHandler.handle(Future.failedFuture(authReply.cause()));
+            webClient.get(443,url.getHost(), url.getPath()+"/.well-known/jwks.json")
+                    .ssl(true)
+                    .send(jwksReply -> {
+                        if(jwksReply.succeeded()){
+                            JsonArray jArray = jwksReply.result().bodyAsJsonObject().getJsonArray("keys");
+                            List<JsonObject> objList = new ArrayList<>();
+                            for(int i = 0;i<jArray.size();i++){
+                                objList.add(jArray.getJsonObject(i));
                             }
-                        });
-                    } else {
-                        LOGGER.info(jwksReply.cause());
-                        resultHandler.handle(Future.failedFuture(jwksReply.cause()));
-                    }
-                });
+                            AuthProvider p = JWTAuth.create(vertx,
+                                    new JWTAuthOptions()
+                                            .setJwks(objList).setJWTOptions(
+                                                    new JWTOptions()
+                                                            .setIgnoreExpiration(false)
+                                                            .setAudience(Arrays.asList(this.targetAudience))
+                                                            .setIssuer(dapsIssuer)));
+                            p.authenticate(dynamicAttributeTokenJson, authReply -> {
+                                if(authReply.succeeded()){
+                                    resultHandler.handle(Future.succeededFuture(authReply.result()));
+                                } else {
+                                    LOGGER.info(authReply.cause());
+                                    resultHandler.handle(Future.failedFuture(authReply.cause()));
+                                }
+                            });
+                        } else {
+                            LOGGER.info(jwksReply.cause());
+                            resultHandler.handle(Future.failedFuture(jwksReply.cause()));
+                        }
+                    });
+        } else {
+            resultHandler.handle(Future.succeededFuture());
+        }
     }
 
     @Override
     public AuthAdapterService retrieveToken(Handler<AsyncResult<String>> resultHandler){
+        if(this.mode.toLowerCase().equals("enforce") || this.mode.toLowerCase().equals("identify")) {
+            LOGGER.info("Retrieving Dynamic Attribute Token...");
+            Promise<MultiMap> formPromise = Promise.promise();
 
-        LOGGER.info("Retrieving Dynamic Attribute Token...");
-        Promise<MultiMap> formPromise = Promise.promise();
+            buildJWT(reply -> {
+                if (reply.succeeded()) {
+                    buildForm(reply, formPromise);
+                }
+            });
 
-        buildJWT( reply -> {
-            if(reply.succeeded()){
-                buildForm(reply, formPromise);
+            Promise<URL> urlPromise = Promise.promise();
+            try {
+                URL url = new URL(dapsUrl);
+                urlPromise.complete(url);
+            } catch (MalformedURLException e) {
+                LOGGER.error(e);
+                urlPromise.fail(e);
             }
-        });
 
-        Promise<URL> urlPromise = Promise.promise();
-        try {
-            URL url = new URL(dapsUrl);
-            urlPromise.complete(url);
-        } catch (MalformedURLException e) {
-            LOGGER.error(e);
-            urlPromise.fail(e);
+            executeRequest(formPromise.future(), urlPromise.future(), resultHandler);
+        } else {
+            resultHandler.handle(Future.succeededFuture("abcd123"));
         }
-
-        executeRequest(formPromise.future(), urlPromise.future(), resultHandler);
-
         return this;
     }
 
@@ -286,7 +297,8 @@ public class AuthAdapterServiceImpl implements AuthAdapterService {
                             }
                         });
             } else {
-
+                LOGGER.error(prepareResult.cause());
+                next.handle(Future.failedFuture(prepareResult.cause()));
             }
         });
     }
