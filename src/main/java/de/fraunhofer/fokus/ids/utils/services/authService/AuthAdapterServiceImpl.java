@@ -66,7 +66,7 @@ public class AuthAdapterServiceImpl implements AuthAdapterService {
             this.vertx = vertx;
             this.dapsUrl = config.getString("dapsurl");
             this.dapsIssuer = config.getString("dapsissuer");
-            this.mode = config.getString("mode");
+            this.mode = config.containsKey("mode")?config.getString("mode"):"skip";
             LOGGER.info("Auth Mode set to: " + this.mode);
             this.breaker = CircuitBreaker.create("token-circuit-breaker", vertx,
                     new CircuitBreakerOptions().setMaxRetries(10)
