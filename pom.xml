@@ -211,7 +211,7 @@
         <repository>
             <id>eis-snapshot-repo</id>
             <name>maven-snapshots</name>
-            <url>http://maven.iais.fraunhofer.de/artifactory/eis-ids-snapshot</url>
+            <url>https://maven.iais.fraunhofer.de/artifactory/eis-ids-snapshot</url>
         </repository>
     </repositories>
     <distributionManagement>
